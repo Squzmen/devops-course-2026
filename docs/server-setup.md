@@ -48,7 +48,7 @@ VBoxManage modifyvm devops-vm --natpf1 "ssh,tcp,127.0.0.1,2222,,2222"
 | Имя | Группы | Аутентификация по SSH | Назначение |
 |---|---|---|---|
 | student | student, sudo | вход по SSH запрещён (`AllowUsers devops`); только консоль ВМ, пароль | учётная запись установки |
-| devops | devops, sudo (+ docker с ПР № 7) | только ключ Ed25519 `~/.ssh/devops_vm` (хост), пароль нужен лишь для sudo | администрирование и деплой |
+| devops | devops, sudo, docker | только ключ Ed25519 `~/.ssh/devops_vm` (хост), пароль нужен лишь для sudo | администрирование и деплой |
 | root | — | вход запрещён (`PermitRootLogin no`), пароль заблокирован | — |
 
 ```
@@ -145,6 +145,7 @@ hostname -f                                    # devops-vm.devops.local
 | 03-ssh-hardened | 2026-10-30 01:33, ВМ выключена | sshd усилен (2222, только ключи), NAT 2222→2222, UFW ещё выключен |
 | pr5-final | 2026-10-30 01:46, ВМ выключена | резерв: итог ПР № 5 перед проверкой документации |
 | 04-nginx-https | 2026-10-30 01:52, ВМ выключена | конфигурация восстановлена по документу с 01-clean-install; Nginx, HTTPS |
+| 05-docker-compose | 2026-10-30 02:09, ВМ выключена | Docker Engine, проект ~/app (приложение + PostgreSQL), до настройки прокси |
 
 Проверка конфигурации: `scripts/audit.sh` (код возврата 0 — конфигурация соответствует документу).
 
@@ -200,6 +201,47 @@ scripts/deploy.sh
 ```
 HSTS не включается: при самоподписанном сертификате браузер заблокирует ресурс без возможности продолжить.
 Хост Windows: rsync запускается из MSYS2 (`C:\msys64`, `pacman -S rsync`), у которого свой `~/.ssh` — ключ `devops_vm`, `config` и `known_hosts` копируются туда, а `devops.crt` — в `~` MSYS2.
+
+## 9. Контейнеризация
+
+| Параметр | Значение |
+|---|---|
+| Docker Engine | 29.9.2 из официального репозитория `download.docker.com` (пакеты `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin`), Compose v5.6.1; `docker.io` из Ubuntu не используется |
+| Группа docker | только `devops` (имеет sudo; членство в docker равносильно root) |
+| Проект | `/home/devops/app` (доставляется `rsync -avz --delete --exclude=.env app/ devops:app/` из `app/` репозитория) |
+| Секреты | `/home/devops/app/.env`, владелец devops, права **600**, `POSTGRES_PASSWORD` = `openssl rand -hex 16`, создаётся только на сервере, в Git и образ не попадает |
+| Сервисы | `app` — образ `devops-app:1.0` (python:3.12-slim, пользователь `app`, gunicorn :5000); `db` — `postgres:16-alpine` с healthcheck `pg_isready` |
+| Публикуемые порты | `127.0.0.1:5000 -> app:5000`; порт 5432 не публикуется (доступ только из сети `app_backend`) |
+| Сети и тома | сеть `app_backend` (bridge), именованный том `app_db_data` → `/var/lib/postgresql/data` |
+| Перезапуск | `restart: unless-stopped` — после перезагрузки сервера оба контейнера поднимаются сами |
+| Обратный прокси | в блоке 443 `/etc/nginx/sites-available/devops-site` — `location /app/` → `proxy_pass http://127.0.0.1:5000/` с заголовками Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto |
+
+Восстановление:
+```
+# [VM] Docker Engine по https://docs.docker.com/engine/install/ubuntu/
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+sudo apt-get update && sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker devops          # затем новая SSH-сессия
+# [Хост, MSYS2]
+rsync -avz --delete --exclude=.env app/ devops:app/
+# [VM]
+cd ~/app && cp .env.example .env && chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build
+# [VM] Nginx: добавить в блок 443 перед error_page
+    location /app/ {
+        proxy_pass http://127.0.0.1:5000/;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+sudo nginx -t && sudo systemctl reload nginx
+```
+Внимание: порт, опубликованный на `0.0.0.0` (`"5000:5000"`), доступен из сети в обход UFW — Docker добавляет DNAT в цепочки, которые обрабатываются раньше правил UFW. Публиковать только на `127.0.0.1`. `docker compose down -v` удаляет том с базой данных.
 
 ## Замечания по стенду
 
