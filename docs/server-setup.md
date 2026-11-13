@@ -243,6 +243,36 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 Внимание: порт, опубликованный на `0.0.0.0` (`"5000:5000"`), доступен из сети в обход UFW — Docker добавляет DNAT в цепочки, которые обрабатываются раньше правил UFW. Публиковать только на `127.0.0.1`. `docker compose down -v` удаляет том с базой данных.
 
+## 10. Ansible
+
+С ПР № 11 конфигурация ВМ и развёртывание приложения описаны в Ansible; ручные разделы 4–9 остаются справочными.
+
+| Параметр | Значение |
+|---|---|
+| Проект | `ansible/` в репозитории devops-course-2026 (на управляющем узле: `~/devops-course-2026/ansible`, вне `/mnt/c`) |
+| Управляющий узел | WSL Ubuntu 24.04 на хостовой системе, ansible-core 2.16.3, sshpass 1.09; коллекции из `ansible/requirements.yml`: ansible.posix 1.6.2, community.docker 4.5.0, community.general 9.5.0 |
+| Управляемый узел | devops-vm, восстановленная со снимка `01-clean-install`, Ubuntu Server 24.04, адрес Host-only `192.168.56.102`, SSH порт 22 |
+| Inventory | `inventory/bootstrap.ini` — первичный запуск; `inventory/prod.ini` — все последующие (выбран по умолчанию в `ansible.cfg`) |
+| Учётная запись bootstrap | `student`, пароль SSH и sudo вводятся интерактивно (`--ask-pass --ask-become-pass`) |
+| Учётная запись prod | `devops`, ключ `~/.ssh/devops_vm` (на управляющем узле, права 0600), `sudo` без пароля (`/etc/sudoers.d/devops`) |
+| Роль `base` | проверка ОС, базовые пакеты, `python3-debian`, `python3-requests`, официальный репозиторий Docker (deb822), Docker Engine, служба docker |
+| Роль `ssh` | пользователь devops, ключ, sudoers, `/etc/ssh/sshd_config.d/00-ansible-hardening.conf` (пароли и root запрещены, `AllowUsers student devops`), UFW: deny incoming, allow 22 и 80 |
+| Роль `nginx` | пакет nginx, reverse proxy `/etc/nginx/sites-available/devops-ci-app` (порт 80 → `127.0.0.1:5000`), default отключён; handlers `nginx -t` + reload |
+| Роль `app` | `devops` в группе docker, загрузка образа, контейнер `devops-ci-app` (`restart: unless-stopped`), проверка `/health` |
+| Образ GHCR | `ghcr.io/squzmen/devops-ci-app` (пакет публичный, pull без аутентификации) |
+| Полный SHA | `823b52df63636d9146f447ded667f83d628925ce` (переменная `app_tag` в `group_vars/all.yml`) |
+| Порт контейнера | `127.0.0.1:5000 -> 5000` (наружу только через Nginx на 80) |
+| Health endpoint | `/health` → `{"status": "ok"}` |
+
+Команды (из каталога `ansible/`):
+```
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook -i inventory/bootstrap.ini site.yml --ask-pass --ask-become-pass   # первичный запуск
+ansible-playbook site.yml                                                          # повторный запуск (prod), ожидается changed=0
+ansible-playbook verify.yml                                                        # read-only аудит
+```
+Если первичный запуск оборвался после роли `ssh`, повторять его нужно уже через `prod.ini`: парольный вход к этому моменту отключён. Новая версия приложения разворачивается заменой `app_tag` на SHA, опубликованный CI, и запуском `site.yml`.
+
 ## Замечания по стенду
 
 - Хост: Windows 11 с включённой VBS/Virtual Machine Platform, поэтому VirtualBox работает через Hyper-V (режим NEM). С 2 vCPU гость периодически зависал (`soft lockup`, отставание таймера до 290 с), поэтому ВМ работает с **1 vCPU**.

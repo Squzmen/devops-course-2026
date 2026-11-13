@@ -1,0 +1,6 @@
+---
+app_image: "ghcr.io/squzmen/devops-ci-app"
+app_tag: "823b52df63636d9146f447ded667f83d628925ce"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
